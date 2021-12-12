@@ -15980,14 +15980,18 @@ var M$1 = {
 ${proxyPolyfill.replace(/\n/g, ' ')}
 
 
-function linkHeavenlyObject(path, keys) {
-  log('linkHeavenlyObject', JSON.stringify(path), JSON.stringify(keys));
-  var obj = {
-  };
+function linkHeavenlyObject(path, keys, isFunction) {
+  log('linkHeavenlyObject', JSON.stringify(path), JSON.stringify(keys), isFunction);
+  var obj = {};
+  if (isFunction) {
+    obj = function() {
+    }
+  }
   for (var i = 0; i < keys.length; i++) {
     obj[keys[i]] = undefined;
   }
-  var result = new Proxy(obj, {
+
+  var proxy = {
     get: function(target, name) {
       //log("getting", JSON.stringify(path), JSON.stringify(name));
       var val = JSON.parse(getFromHeaven(JSON.stringify(path.concat(name))));
@@ -15996,7 +16000,7 @@ function linkHeavenlyObject(path, keys) {
       if (val.type === 'object') {
         return linkHeavenlyObject(path.concat(name), val.keys);
       } else if (val.type === 'function') {
-        return linkHeavenlyFunction(path.concat(name));
+        return linkHeavenlyFunction(path.concat(name), val.keys);
       } else {
         return val.value;
       }
@@ -16025,7 +16029,23 @@ function linkHeavenlyObject(path, keys) {
       }
       sendToHeaven(JSON.stringify(path.concat(name)), toSend);
     },
-  });
+  };
+
+  if (isFunction) {
+    proxy.apply = function(target, thisArg, args) {
+      log("running", JSON.stringify(path));
+      var args = prepareArguments(args);
+      var ret = prayToHeaven(JSON.stringify(path), JSON.stringify(args));
+      if (ret.type === 'object') {
+        return linkHeavenlyObject(ret.path, ret.keys);
+      } else if (ret.type === 'function') {
+        return linkHeavenlyFunction(ret.path, ret.keys);
+      } else {
+        return ret.value;
+      }
+    }
+  }
+  var result = new Proxy(obj, proxy);
 
   // Add these two props after creating the proxy so they don't go through the mechanism.
   // Recall that a limitation of this proxy is that it can only use properties that exist initially.
@@ -16056,19 +16076,9 @@ function prepareArguments(args) {
   });
 }
 
-function linkHeavenlyFunction(path) {
+function linkHeavenlyFunction(path, keys) {
   //log('linkHeavenlyFunction', JSON.stringify(path));
-  return function() {
-    var args = prepareArguments(arguments);
-    var ret = prayToHeaven(JSON.stringify(path), JSON.stringify(args));
-    if (ret.type === 'object') {
-      return JSON.stringify(linkHeavenlyObject(ret.path, ret.keys));
-    } else if (ret.type === 'function') {
-      return JSON.stringify(linkHeavenlyFunction(ret.path));
-    } else {
-      return ret.value;
-    }
-  }
+  return linkHeavenlyObject(path, keys, true);
 }
 
 // Now test it.
@@ -16097,13 +16107,13 @@ var proxyHeader = M$1.proxyHeader;
 
 function getPropertyWatchlist(object) {
   var watchlist = [];
-  watchlist.push(...Object.getOwnPropertyNames(object));
+  watchlist.push(...Object.keys(object));
 
   var curr = object;
   while (curr.__proto__) {
     curr = curr.__proto__;
     // TODO: for gl object there are MANY properties here. Find a way to reduce this.
-    watchlist.push(...Object.getOwnPropertyNames(curr));
+    watchlist.push(...Object.keys(curr));
   }
 
   return watchlist;
@@ -16166,7 +16176,7 @@ var createInterpreterEnvironment = function () {
   }
 
   function call(path, args) {
-    //console.log('call', path, args);
+    console.log('call', path, args);
     var rawArgs = args.map(arg => machineToRaw(arg));
     var fn = getRawValue(path);
     if (typeof fn !== 'function') {
@@ -16203,7 +16213,8 @@ var createInterpreterEnvironment = function () {
       case 'function':
         return {
           type: 'function',
-          path
+          path,
+          keys: getPropertyWatchlist(rawValue),
         };
       default:
         throw new Error('Unknown type: ' + typeof current);
@@ -16259,7 +16270,7 @@ var createInterpreterEnvironment = function () {
       if (machineArg.type === 'object') {
         interpreter.appendCode(`var ${machineArg.path.join('_')} = linkHeavenlyObject(${JSON.stringify(machineArg.path)}, ${JSON.stringify(machineArg.keys)});`);
       } else if (machineArg.type === 'function') {
-        interpreter.appendCode(`var ${machineArg.path.join('_')} = linkHeavenlyFunction(${JSON.stringify(machineArg.path)});`);
+        interpreter.appendCode(`var ${machineArg.path.join('_')} = linkHeavenlyFunction(${JSON.stringify(machineArg.path)}, ${JSON.stringify(machineArg.keys)});`);
       } else {
         interpreter.appendCode(`var ${machineArg.path.join('_')} = ${JSON.stringify(machineArg.value)};`);
       }
@@ -16315,7 +16326,7 @@ var createInterpreterEnvironment = function () {
       } else if (typeof value === 'function') {
         var key = `_global_${name}`;
         data[key] = value;
-        linkBlock += `var ${name} = linkHeavenlyFunction(${JSON.stringify([key])});\n`;
+        linkBlock += `var ${name} = linkHeavenlyFunction(${JSON.stringify([key])}, ${JSON.stringify(getPropertyWatchlist(value))});\n`;
       } else {
         linkBlock += `var ${name} = ${JSON.stringify(value)};\n`;
       }
