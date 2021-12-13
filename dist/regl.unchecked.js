@@ -1192,7 +1192,9 @@ function wrapBufferState (gl, stats, config, destroyBuffer) {
     },
 
     getBuffer: function (wrapper) {
+      console.log("Checking if ", wrapper, " is a buffer")
       if (wrapper && wrapper._buffer instanceof REGLBuffer) {
+        console.log(wrapper._buffer, "is a regl buffer");
         return wrapper._buffer
       }
       return null
@@ -15115,7 +15117,8 @@ function linkHeavenlyObject(path, keys, isFunction) {
     proxy.apply = function(target, thisArg, args) {
       log("running", JSON.stringify(path));
       var args = prepareArguments(args);
-      var ret = prayToHeaven(JSON.stringify(path), JSON.stringify(args));
+      var ret = JSON.parse(prayToHeaven(JSON.stringify(path), JSON.stringify(args)));
+      log("ran", JSON.stringify(path), JSON.stringify(args), "got", JSON.stringify(ret));
       if (ret.type === 'object') {
         return linkHeavenlyObject(ret.path, ret.keys);
       } else if (ret.type === 'function') {
@@ -15142,11 +15145,18 @@ function prepareArguments(args) {
   args = [].concat(args);
   return args.map(function (arg) {
     //log("preparing arg", arg);
-    if (typeof arg === 'object' && arg !== null && arg.__isHeavenlyObject) {
-      return {
-        type: 'object',
-        path: arg.__path,
-      };
+    if ((typeof arg === 'object' || typeof arg === 'function') && arg !== null) {
+      if (arg.__isHeavenlyObject) {
+        return {
+          type: 'object',
+          path: arg.__path,
+        };
+      } else {
+        return {
+          type: 'object-literal',
+          value: JSON.stringify(arg),
+        };
+      }
     } else {
       return {
         type: 'primitive',
@@ -15235,7 +15245,13 @@ var createInterpreterEnvironment = function () {
       current = current[path[i]];
     }
     if (typeof current === 'function') {
-      return current.bind(prev);
+      let res = current.bind(prev);
+      Object.defineProperty(res, '__internal', {
+        value: current,
+        enumerable: false,
+      });
+      //res.__internal = current;
+      return res;
     }
     return current;
   }
@@ -15255,6 +15271,8 @@ var createInterpreterEnvironment = function () {
     current[path[path.length - 1]] = value;
   }
 
+  // LIMITATION: Object literals passed as a parameter to this function will not be mutable - changes
+  // to the object will not be reflected in the interpreter.
   function call(path, args) {
     console.log('call', path, args);
     var rawArgs = args.map(arg => machineToRaw(arg));
@@ -15262,7 +15280,7 @@ var createInterpreterEnvironment = function () {
     if (typeof fn !== 'function') {
       throw new Error('Not a function');
     }
-    var raw = fn(...rawArgs);
+    var raw = fn(...rawArgs.map((arg) => typeof arg === 'function' && arg.__internal ? arg.__internal : arg));
     if (typeof raw === 'object' || typeof raw === 'function') {
       var newPath = ['_retobj' + objCnt++];
       setRawValue(newPath, raw);
@@ -15301,6 +15319,19 @@ var createInterpreterEnvironment = function () {
     }
   }
 
+  function deepMachineToRaw(obj) {
+    if (typeof obj !== 'object') {
+      return obj;
+    }
+    if (obj.__isHeavenlyObject) {
+      return getRawValue(obj.__path);
+    }
+    return Object.keys(obj).reduce((acc, key) => {
+      acc[key] = deepMachineToRaw(obj[key]);
+      return acc;
+    }, {});
+  }
+
   //machineToRaw: function(machineValue) {
   function machineToRaw(machineValue) {
     //console.log('machineToRaw', machineValue);
@@ -15310,14 +15341,23 @@ var createInterpreterEnvironment = function () {
       case 'object':
       case 'function':
         return getRawValue(machineValue.path);
+      case 'object-literal':
+        const obj = JSON.parse(machineValue.value);
+        console.log("Literal object got from machine", obj);
+        // swap all the heavenly object references to the actual objects recursively.
+        const result = deepMachineToRaw(obj);
+        console.log("Literal object translates to", result);
+        return result;
       default:
         throw new Error('Unknown type: ' + machineValue.type);
     }
   }
 
   // TODO: memory cleanup
-  function callInMachine(fn, rawArgs) {
-    console.log('callInMachine', fn, rawArgs);
+  function callInMachine(fn, thisArg, rawArgs) {
+    data["g_this"] = thisArg;
+
+    console.log('callInMachine', fn, thisArg, rawArgs);
     
     var machineArgs = (rawArgs || []).map(arg => {
       if (typeof arg === 'object') {
@@ -15358,6 +15398,7 @@ var createInterpreterEnvironment = function () {
 
     // Limitation - nothing actually gets returned in any regl generated function. We will not support return values here,
     // which can get quite complicated.
+    // Limitation 2: Functions that cause another function call into the interpreter is not supported.
     interpreter.appendCode(`var _retobj = ${fn}(${machineArgs.map(arg => arg.path.join('_')).join(', ')});`);
     interpreter.run();
   }
@@ -15414,6 +15455,24 @@ var createInterpreterEnvironment = function () {
 
     //console.log('linkBlock', linkBlock);
 
+    var result = {};
+    // Capture references to "this" in regl.
+    data["g_this"] = result;
+    var thisPropRegex = /this\[['"]([^'"]+)['"]\]/g;
+    
+    var thisRegex = /\bthis\b/g;
+
+    var thisProps = [];
+    var match;
+    while (match = thisPropRegex.exec(code)) {
+      thisProps.push(match[1]);
+    }
+    
+    linkBlock += `var g_this = linkHeavenlyObject(${JSON.stringify(['g_this'])}, ${JSON.stringify(thisProps)});\n`;
+    code = code.replace(thisRegex, 'g_this');
+
+    // Now put the code in the interpreter
+
     var fullCode = proxyHeader + linkBlock + code;
 
     window.fullCodes = window.fullCodes || [];
@@ -15422,12 +15481,12 @@ var createInterpreterEnvironment = function () {
     interpreter = new Interpreter(fullCode, initFunc);
     interpreter.run();
 
-    var result = {};
     for (var procName of procNames) {
       result[procName] = function () {
-        callInMachine(procName, ...arguments);
+        callInMachine(procName, this, ...arguments);
       }
     }
+
     //console.log('compile result', result);
     return result;
   }
@@ -15597,7 +15656,6 @@ function createEnvironment () {
     return result
   }
 
-  // TODO: turn "funcName": implementation... format into function funcName() {...}
   function compile () {
     var code = ['"use strict";',
       globalBlock,
@@ -15615,51 +15673,57 @@ function createEnvironment () {
   }
 
   if (USE_CODEGEN) {
-  proc = function (name, count) {
-    var args = []
-    function arg () {
-      var name = 'a' + args.length
-      args.push(name)
-      return name
-    }
-
-    count = count || 0
-    for (var i = 0; i < count; ++i) {
-      arg()
-    }
-
-    var body = scope()
-    var bodyToString = body.toString
-
-    var result = procedures[name] = extend$1(body, {
-      arg: arg,
-      toString: function () {
-        return join([
-          'function(', args.join(), '){',
-          bodyToString(),
-          '}'
-        ])
+    proc = function (name, count) {
+      var args = []
+      function arg () {
+        var name = 'a' + args.length
+        args.push(name)
+        return name
       }
-    })
 
-    return result
-  }
+      count = count || 0
+      for (var i = 0; i < count; ++i) {
+        arg()
+      }
 
-  compile = function () {
-    var code = ['"use strict";',
-      globalBlock,
-      'return {']
-    Object.keys(procedures).forEach(function (name) {
-      code.push('"', name, '":', procedures[name].toString(), ',')
-    })
-    code.push('}')
-    var src = join(code)
-      .replace(/;/g, ';\n')
-      .replace(/}/g, '}\n')
-      .replace(/{/g, '{\n')
-    var proc = Function.apply(null, linkedNames.concat(src))
-    return proc.apply(null, linkedValues)
-  }
+      var body = scope()
+      var bodyToString = body.toString
+
+      var result = procedures[name] = extend$1(body, {
+        arg: arg,
+        toString: function () {
+          return join([
+            'function(', args.join(), '){',
+            "console.log('" + name + "', this);",
+            "console.trace();",
+            bodyToString(),
+            '}'
+          ])
+        }
+      })
+
+      return result
+    }
+
+    compile = function () {
+      var code = ['"use strict";',
+        globalBlock,
+        'return {']
+      Object.keys(procedures).forEach(function (name) {
+        code.push('"', name, '":', procedures[name].toString(), ',')
+      })
+      code.push('}')
+      var src = join(code)
+        .replace(/;/g, ';\n')
+        .replace(/}/g, '}\n')
+        .replace(/{/g, '{\n')
+
+      window.fullCodes = window.fullCodes || [];
+      window.fullCodes.push(src);
+
+      var proc = Function.apply(null, linkedNames.concat(src))
+      return proc.apply(null, linkedValues)
+    }
   }
 
   return {
@@ -16141,6 +16205,7 @@ function reglCore (
     env.batchId = '0'
 
     // link shared state
+    window.sharedState = sharedState;
     var SHARED = link(sharedState)
     var shared = env.shared = {
       props: 'a0'
@@ -16468,7 +16533,6 @@ function reglCore (
     var dynamicOptions = options.dynamic
 
     function parseShader (name) {
-      console.log('parseShader', name);
       if (name in staticOptions) {
         var id = stringStore.id(staticOptions[name])
         
@@ -17349,7 +17413,7 @@ function reglCore (
       var dyn = dynamicAttributes[attribute]
 
       function appendAttributeCode (env, block) {
-        var VALUE = env.invoke(block, dyn)
+        var VALUE = env.invoke(block, dyn);
 
         var shared = env.shared
         var constants = env.constants
@@ -18782,6 +18846,7 @@ function reglCore (
   // ===========================================================================
   // ===========================================================================
   function compileCommand (options, attributes, uniforms, context, stats) {
+    console.log("Compiling with attributes", attributes);
     var env = createREGLEnvironment()
 
     // link stats, so that we can easily access it in the program.
@@ -18813,7 +18878,7 @@ function reglCore (
   // POLL / REFRESH
   // ===========================================================================
   // ===========================================================================
-  return {
+  var retval = {
     next: nextState,
     current: currentState,
     procs: (function () {
@@ -18936,6 +19001,8 @@ function reglCore (
     })(),
     compile: compileCommand
   }
+
+  return retval;
 }
 
 function stats () {
