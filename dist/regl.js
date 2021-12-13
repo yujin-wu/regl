@@ -15981,6 +15981,14 @@ var M$1 = {
 // function log(msg) { };
 ${proxyPolyfill.replace(/\n/g, ' ')}
 
+// "polyfill" for Float32Array
+function Float32Array(length) {
+  var arr = new Array(length);
+  for (var i = 0; i < length; i++) {
+    arr[i] = 0;
+  }
+  return arr;
+}
 
 function linkHeavenlyObject(path, keys, isFunction) {
   log('linkHeavenlyObject', JSON.stringify(path), JSON.stringify(keys), isFunction);
@@ -16117,6 +16125,10 @@ var proxyHeader = M$1.proxyHeader;
 
 function getPropertyWatchlist(object) {
   var watchlist = [];
+  if (Array.isArray(object) || ArrayBuffer.isView(object)) {
+    watchlist.push('length');
+  }
+
   watchlist.push(...Object.keys(object));
 
   var curr = object;
@@ -16136,7 +16148,8 @@ function getPropertyWatchlist(object) {
 // LIMITATIONS:
 // arguments from interpreter to real that are interpreter objects are not supported.
 // Invoking an interpreter function using callInMachine does not produce a return value.
-
+// Arrays inside the interpreter that are passed from heaven cannot be mutated. They have their "length" property
+//   hacked in.
 
 // MAYBE we have to extend it where we pass in the path of object return values to 
 // the machine if the object is the same as one that's already stored, to satisfy
@@ -16274,7 +16287,7 @@ var createInterpreterEnvironment = function () {
   }
 
   // TODO: memory cleanup
-  function callInMachine(fn, thisArg, rawArgs) {
+  function callInMachine(fn, thisArg, ...rawArgs) {
     data["g_this"] = thisArg;
 
     console.log('callInMachine', fn, thisArg, rawArgs);
@@ -16306,20 +16319,23 @@ var createInterpreterEnvironment = function () {
 
     console.log('machineArgs', machineArgs);
 
+    var argNames = [];
     for (var machineArg of machineArgs) {
+      var argName = '_arg' + objCnt++;
+      argNames.push(argName);
       if (machineArg.type === 'object') {
-        interpreter.appendCode(`var ${machineArg.path.join('_')} = linkHeavenlyObject(${JSON.stringify(machineArg.path)}, ${JSON.stringify(machineArg.keys)});`);
+        interpreter.appendCode(`var ${argName} = linkHeavenlyObject(${JSON.stringify(machineArg.path)}, ${JSON.stringify(machineArg.keys)});`);
       } else if (machineArg.type === 'function') {
-        interpreter.appendCode(`var ${machineArg.path.join('_')} = linkHeavenlyFunction(${JSON.stringify(machineArg.path)}, ${JSON.stringify(machineArg.keys)});`);
+        interpreter.appendCode(`var ${argName} = linkHeavenlyFunction(${JSON.stringify(machineArg.path)}, ${JSON.stringify(machineArg.keys)});`);
       } else {
-        interpreter.appendCode(`var ${machineArg.path.join('_')} = ${JSON.stringify(machineArg.value)};`);
+        interpreter.appendCode(`var ${argName} = ${JSON.stringify(machineArg.value)};`);
       }
     }
 
     // Limitation - nothing actually gets returned in any regl generated function. We will not support return values here,
     // which can get quite complicated.
     // Limitation 2: Functions that cause another function call into the interpreter is not supported.
-    interpreter.appendCode(`var _retobj = ${fn}(${machineArgs.map(arg => arg.path.join('_')).join(', ')});`);
+    interpreter.appendCode(`var _retobj = ${fn}(${argNames.join(', ')});`);
     interpreter.run();
   }
 
