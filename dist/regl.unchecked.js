@@ -4685,16 +4685,13 @@ function wrapShaderState (gl, stringStore, stats, config) {
               gl.getUniformLocation(program, name),
               info))
           }
+        } else {
+          insertActiveInfo(uniforms, new ActiveInfo(
+            info.name,
+            stringStore.id(info.name),
+            gl.getUniformLocation(program, info.name),
+            info))
         }
-        var uniName = info.name
-        if (info.size > 1) {
-          uniName = uniName.replace('[0]', '')
-        }
-        insertActiveInfo(uniforms, new ActiveInfo(
-          uniName,
-          stringStore.id(uniName),
-          gl.getUniformLocation(program, uniName),
-          info))
       }
     }
 
@@ -4937,7 +4934,7 @@ function join (x) {
   return slice(x).join('')
 }
 
-function createEnvironment () {
+function createEnvironment (debug) {
   // Unique variable id counter
   var varCounter = 0
 
@@ -4946,6 +4943,7 @@ function createEnvironment () {
   // the variable name which it is bound to
   var linkedNames = []
   var linkedValues = []
+
   function link (value) {
     for (var i = 0; i < linkedValues.length; ++i) {
       if (linkedValues[i] === value) {
@@ -4963,11 +4961,12 @@ function createEnvironment () {
   function block () {
     var code = []
     function push () {
+      code.push("/* " + new Error().stack + " */\n");
       code.push.apply(code, slice(arguments))
     }
-
     var vars = []
     function def () {
+      code.push("/* " + new Error().stack + " */\n");
       var name = 'v' + (varCounter++)
       vars.push(name)
 
@@ -5083,8 +5082,13 @@ function createEnvironment () {
     return result
   }
 
+  var debugBlock = "/*\n" + 
+    JSON.stringify(debug, null, 2) +
+    "\n*/\n";
+
   function compile () {
     var code = ['"use strict";',
+      debugBlock,
       globalBlock,
       'return {']
     Object.keys(procedures).forEach(function (name) {
@@ -5095,6 +5099,21 @@ function createEnvironment () {
       .replace(/;/g, ';\n')
       .replace(/}/g, '}\n')
       .replace(/{/g, '{\n')
+
+
+    fetch('http://localhost:8080/code', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
+          code: src,
+          linkedNames: linkedNames,
+          stackTrace: Error().stack
+        })
+      });
+
+
     var proc = Function.apply(null, linkedNames.concat(src))
     return proc.apply(null, linkedValues)
   }
@@ -5569,8 +5588,8 @@ function reglCore (
   }
 
   var drawCallCounter = 0
-  function createREGLEnvironment () {
-    var env = createEnvironment()
+  function createREGLEnvironment (debug) {
+    var env = createEnvironment(debug)
     var link = env.link
     var global = env.global
     env.id = drawCallCounter++
@@ -7366,25 +7385,12 @@ function reglCore (
     var shared = env.shared
     var GL = shared.gl
 
-    var definedArrUniforms = {}
     var infix
     for (var i = 0; i < uniforms.length; ++i) {
       var uniform = uniforms[i]
       var name = uniform.name
       var type = uniform.info.type
-      var size = uniform.info.size
       var arg = args.uniforms[name]
-      if (size > 1) {
-        // either foo[n] or foos, avoid define both
-        if (!arg) {
-          continue
-        }
-        var arrUniformName = name.replace('[0]', '')
-        if (definedArrUniforms[arrUniformName]) {
-          continue
-        }
-        definedArrUniforms[arrUniformName] = 1
-      }
       var UNIFORM = env.link(uniform)
       var LOCATION = UNIFORM + '.location'
 
@@ -7420,11 +7426,7 @@ function reglCore (
           } else {
             switch (type) {
               case GL_FLOAT$7:
-                if (size === 1) {
-                  
-                } else {
-                  
-                }
+                
                 infix = '1f'
                 break
               case GL_FLOAT_VEC2:
@@ -7440,19 +7442,11 @@ function reglCore (
                 infix = '4f'
                 break
               case GL_BOOL:
-                if (size === 1) {
-                  
-                } else {
-                  
-                }
+                
                 infix = '1i'
                 break
               case GL_INT$2:
-                if (size === 1) {
-                  
-                } else {
-                  
-                }
+                
                 infix = '1i'
                 break
               case GL_BOOL_VEC2:
@@ -7480,15 +7474,8 @@ function reglCore (
                 infix = '4i'
                 break
             }
-            if (size > 1) {
-              infix += 'v'
-              value = env.global.def('[' +
-              Array.prototype.slice.call(value) + ']')
-            } else {
-              value = isArrayLike(value) ? Array.prototype.slice.call(value) : value
-            }
             scope(GL, '.uniform', infix, '(', LOCATION, ',',
-              value,
+              isArrayLike(value) ? Array.prototype.slice.call(value) : value,
               ');')
           }
           continue
@@ -7581,11 +7568,6 @@ function reglCore (
         case GL_FLOAT_MAT4:
           infix = 'Matrix4fv'
           break
-      }
-
-      if (infix.indexOf('Matrix') === -1 && size > 1) {
-        infix += 'v'
-        unroll = 1
       }
 
       if (infix.charAt(0) === 'M') {
@@ -7810,7 +7792,7 @@ function reglCore (
   }
 
   function createBody (emitBody, parentEnv, args, program, count) {
-    var env = createREGLEnvironment()
+    var env = createREGLEnvironment({args, config, type: "createBody"})
     var scope = env.proc('body', count)
     
     if (extInstancing) {
@@ -8254,8 +8236,8 @@ function reglCore (
   // MAIN DRAW COMMAND
   // ===========================================================================
   // ===========================================================================
-  function compileCommand (options, attributes, uniforms, context, stats) {
-    var env = createREGLEnvironment()
+  function compileCommand (options, attributes, uniforms, context, stats, debug) {
+    var env = createREGLEnvironment(debug)
 
     // link stats, so that we can easily access it in the program.
     env.stats = env.link(stats)
@@ -8290,7 +8272,7 @@ function reglCore (
     next: nextState,
     current: currentState,
     procs: (function () {
-      var env = createREGLEnvironment()
+      var env = createREGLEnvironment({config, type: "poll/refresh"})
       var poll = env.proc('poll')
       var refresh = env.proc('refresh')
       var common = env.block()
@@ -8893,7 +8875,7 @@ function wrapREGL (args) {
       count: 0
     }
 
-    var compiled = core.compile(opts, attributes, uniforms, context, stats$$1)
+    var compiled = core.compile(opts, attributes, uniforms, context, stats$$1, {options, args})
 
     var draw = compiled.draw
     var batch = compiled.batch

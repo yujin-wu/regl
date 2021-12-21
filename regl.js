@@ -350,7 +350,7 @@ module.exports = function wrapREGL (args) {
       count: 0
     }
 
-    var compiled = core.compile(opts, attributes, uniforms, context, stats)
+    var compiled = core.compile(opts, attributes, uniforms, context, stats, {options, args})
 
     var draw = compiled.draw
     var batch = compiled.batch
