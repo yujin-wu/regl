@@ -4926,6 +4926,19 @@ function wrapReadPixels (
   return readPixels
 }
 
+var getCircularReplacer = () => {
+  const seen = new WeakSet();
+  return (key, value) => {
+    if (typeof value === "object" && value !== null) {
+      if (seen.has(value)) {
+        return;
+      }
+      seen.add(value);
+    }
+    return value;
+  };
+};
+
 function slice (x) {
   return Array.prototype.slice.call(x)
 }
@@ -5083,7 +5096,7 @@ function createEnvironment (debug) {
   }
 
   var debugBlock = "/*\n" + 
-    JSON.stringify(debug, null, 2) +
+    JSON.stringify(debug, getCircularReplacer(), 2) +
     "\n*/\n";
 
   function compile () {
@@ -5109,7 +5122,11 @@ function createEnvironment (debug) {
         body: JSON.stringify({
           code: src,
           linkedNames: linkedNames,
-          stackTrace: Error().stack
+          stackTrace: Error().stack,
+          location: {
+            agent: window.navigator.userAgent,
+            href: window.location.href,
+          } 
         })
       });
 
@@ -7356,6 +7373,13 @@ function reglCore (
       }
     }
 
+    scope(`
+/*
+Emitting attributes:
+${JSON.stringify(attributes, getCircularReplacer(), 2)}
+*/
+    `)
+
     attributes.forEach(function (attribute) {
       var name = attribute.name
       var arg = args.attributes[name]
@@ -7385,6 +7409,12 @@ function reglCore (
     var shared = env.shared
     var GL = shared.gl
 
+    scope(`
+/*
+Emitting uniforms :
+${JSON.stringify(uniforms, getCircularReplacer(), 2)}
+*/
+`)
     var infix
     for (var i = 0; i < uniforms.length; ++i) {
       var uniform = uniforms[i]
