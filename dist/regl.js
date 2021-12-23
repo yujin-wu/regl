@@ -5894,12 +5894,12 @@ function createEnvironment (debug) {
   function block () {
     var code = []
     function push () {
-      code.push("/* " + new Error().stack + " */\n");
+     // code.push("/* " + new Error().stack + " */\n");
       code.push.apply(code, slice(arguments))
     }
     var vars = []
     function def () {
-      code.push("/* " + new Error().stack + " */\n");
+    //  code.push("/* " + new Error().stack + " */\n");
       var name = 'v' + (varCounter++)
       vars.push(name)
 
@@ -5952,6 +5952,7 @@ function createEnvironment (debug) {
   }
 
   function conditional () {
+    
     var pred = join(arguments)
     var thenBlock = scope()
     var elseBlock = scope()
@@ -6019,9 +6020,9 @@ function createEnvironment (debug) {
     JSON.stringify(debug, getCircularReplacer(), 2) +
     "\n*/\n";
 
-  function compile () {
+  function compile (globalScope) {
     var code = ['"use strict";',
-      debugBlock,
+      // debugBlock,
       globalBlock,
       'return {']
     Object.keys(procedures).forEach(function (name) {
@@ -6051,8 +6052,8 @@ function createEnvironment (debug) {
       });
 
 
-    var proc = Function.apply(null, linkedNames.concat(src))
-    return proc.apply(null, linkedValues)
+    var proc = Function.apply(null, ["_gs"].concat(linkedNames).concat(src))
+    return proc.apply(null, [globalScope].concat(linkedValues))
   }
 
   return {
@@ -8353,17 +8354,16 @@ function reglCore (
       if (GL_FLAGS[param]) {
         var flag = GL_FLAGS[param]
         if (isStatic(defn)) {
-          if (variable) {
-            scope(GL, '.enable(', flag, ');')
-          } else {
-            scope(GL, '.disable(', flag, ');')
-          }
+          scope(env.cond(env.stableRef(variable))
+            .then(GL, '.enable(', flag, ');')
+            .else(GL, '.disable(', flag, ');'))
+          scope(CURRENT_STATE, '.', param, '=', env.stableRef(variable), ';')
         } else {
           scope(env.cond(variable)
             .then(GL, '.enable(', flag, ');')
             .else(GL, '.disable(', flag, ');'))
+            scope(CURRENT_STATE, '.', param, '=', variable, ';')
         }
-        scope(CURRENT_STATE, '.', param, '=', variable, ';')
       } else if (isArrayLike(variable)) {
         var CURRENT = CURRENT_VARS[param]
         scope(
@@ -8373,8 +8373,8 @@ function reglCore (
           }).join(';'), ';')
       } else {
         scope(
-          GL, '.', GL_VARIABLES[param], '(', variable, ');',
-          CURRENT_STATE, '.', param, '=', variable, ';')
+          GL, '.', GL_VARIABLES[param], '(', env.stableRef(variable), ');',
+          CURRENT_STATE, '.', param, '=', env.stableRef(variable), ';')
       }
     })
   }
@@ -8583,12 +8583,12 @@ function reglCore (
       }
     }
 
-    scope(`
-/*
-Emitting attributes:
-${JSON.stringify(attributes, getCircularReplacer(), 2)}
-*/
-    `)
+//     scope(`
+// /*
+// Emitting attributes:
+// ${JSON.stringify(attributes, getCircularReplacer(), 2)}
+// */
+//     `)
 
     attributes.forEach(function (attribute) {
       var name = attribute.name
@@ -8623,12 +8623,12 @@ ${JSON.stringify(attributes, getCircularReplacer(), 2)}
     var shared = env.shared
     var GL = shared.gl
 
-    scope(`
-/*
-Emitting uniforms :
-${JSON.stringify(uniforms, getCircularReplacer(), 2)}
-*/
-`)
+//     scope(`
+// /*
+// Emitting uniforms :
+// ${JSON.stringify(uniforms, getCircularReplacer(), 2)}
+// */
+// `)
     var infix
     for (var i = 0; i < uniforms.length; ++i) {
       var uniform = uniforms[i]
@@ -9472,10 +9472,10 @@ ${JSON.stringify(uniforms, getCircularReplacer(), 2)}
       var value = defn.append(env, scope)
       if (isArrayLike(value)) {
         value.forEach(function (v, i) {
-          scope.set(env.next[name], '[' + i + ']', v)
+          scope.set(env.next[name], '[' + i + ']', env.stableRef(v))
         })
       } else {
-        scope.set(shared.next, '.' + name, value)
+        scope.set(shared.next, '.' + name, env.stableRef(value))
       }
     })
 
@@ -9487,17 +9487,17 @@ ${JSON.stringify(uniforms, getCircularReplacer(), 2)}
         if (!variable) {
           return
         }
-        scope.set(shared.draw, '.' + opt, '' + variable.append(env, scope))
+        scope.set(shared.draw, '.' + opt, env.stableRef('' + variable.append(env, scope)))
       })
 
     Object.keys(args.uniforms).forEach(function (opt) {
       var value = args.uniforms[opt].append(env, scope)
       if (Array.isArray(value)) {
-        value = '[' + value.join() + ']'
+        value = '[' + env.stableRef(value.join()) + ']'
       }
       scope.set(
         shared.uniforms,
-        '[' + stringStore.id(opt) + ']',
+        '[' + env.stableRef(stringStore.id(opt)) + ']',
         value)
     })
 
@@ -9510,13 +9510,13 @@ ${JSON.stringify(uniforms, getCircularReplacer(), 2)}
     })
 
     if (args.scopeVAO) {
-      scope.set(shared.vao, '.targetVAO', args.scopeVAO.append(env, scope))
+      scope.set(shared.vao, '.targetVAO', env.stableRef(args.scopeVAO.append(env, scope)))
     }
 
     function saveShader (name) {
       var shader = args.shader[name]
       if (shader) {
-        scope.set(shared.shader, '.' + name, shader.append(env, scope))
+        scope.set(shared.shader, '.' + name, env.stableRef(shader.append(env, scope)))
       }
     }
     saveShader(S_VERT)
@@ -9629,11 +9629,24 @@ ${JSON.stringify(uniforms, getCircularReplacer(), 2)}
 
     var args = parseArguments(options, attributes, uniforms, context, env)
 
+    // Fix code stability issue across platforms and runs
+    if (args.shader.program) {
+      args.shader.program.attributes.sort((a, b) => a.name < b.name ? -1 : 1)
+      args.shader.program.uniforms.sort((a, b) => a.name < b.name ? -1 : 1)
+    }
+    
+    env.globalScope = {};
+    env.globalScopeCounter = 0;
+    env.stableRef = function(val) {
+      this.globalScope[this.globalScopeCounter] = val;
+      return "_gs[" + this.globalScopeCounter++ + "]";
+    }
+
     emitDrawProc(env, args)
     emitScopeProc(env, args)
     emitBatchProc(env, args)
 
-    return extend(env.compile(), {
+    return extend(env.compile(env.globalScope), {
       destroy: function () {
         args.shader.program.destroy()
       }
@@ -9676,38 +9689,47 @@ ${JSON.stringify(uniforms, getCircularReplacer(), 2)}
       if (extensions.oes_vertex_array_object) {
         refresh(env.link(extensions.oes_vertex_array_object), '.bindVertexArrayOES(null);')
       }
-      for (var i = 0; i < limits.maxAttributes; ++i) {
-        var BINDING = refresh.def(shared.attributes, '[', i, ']')
-        var ifte = env.cond(BINDING, '.buffer')
+      var MAX_ATTRIBUTES = env.link(limits.maxAttributes)
+      //for (var i = 0; i < limits.maxAttributes; ++i) {
+
+      
+        var BINDING = refresh.def(shared.attributes)
+
+
+        var ifte = env.cond(BINDING, '[i].buffer')
         ifte.then(
-          GL, '.enableVertexAttribArray(', i, ');',
+          GL, '.enableVertexAttribArray(i);',
           GL, '.bindBuffer(',
           GL_ARRAY_BUFFER$2, ',',
-          BINDING, '.buffer.buffer);',
-          GL, '.vertexAttribPointer(',
-          i, ',',
-          BINDING, '.size,',
-          BINDING, '.type,',
-          BINDING, '.normalized,',
-          BINDING, '.stride,',
-          BINDING, '.offset);'
+          BINDING, '[i].buffer.buffer);',
+          GL, '.vertexAttribPointer(i,',
+          BINDING, '[i].size,',
+          BINDING, '[i].type,',
+          BINDING, '[i].normalized,',
+          BINDING, '[i].stride,',
+          BINDING, '[i].offset);'
         ).else(
-          GL, '.disableVertexAttribArray(', i, ');',
-          GL, '.vertexAttrib4f(',
-          i, ',',
-          BINDING, '.x,',
-          BINDING, '.y,',
-          BINDING, '.z,',
-          BINDING, '.w);',
-          BINDING, '.buffer=null;')
-        refresh(ifte)
+          GL, '.disableVertexAttribArray(i);',
+          GL, '.vertexAttrib4f(i,',
+          BINDING, '[i].x,',
+          BINDING, '[i].y,',
+          BINDING, '[i].z,',
+          BINDING, '[i].w);',
+          BINDING, '[i].buffer=null;')
+        refresh(
+          'for(var i=0;i<', MAX_ATTRIBUTES, ';++i){',
+          ifte,
+          '}'
+        )
+
         if (extInstancing) {
           refresh(
-            INSTANCING, '.vertexAttribDivisorANGLE(',
-            i, ',',
-            BINDING, '.divisor);')
+            'for(var i=0;i<', MAX_ATTRIBUTES, ';++i){',
+            INSTANCING, '.vertexAttribDivisorANGLE(i,',
+            BINDING, '[i].divisor);',
+            '}')
         }
-      }
+      //}
       refresh(
         env.shared.vao, '.currentVAO=null;',
         env.shared.vao, '.setVAO(', env.shared.vao, '.targetVAO);')
